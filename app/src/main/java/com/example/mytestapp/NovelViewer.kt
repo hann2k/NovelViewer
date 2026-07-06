@@ -1,5 +1,6 @@
 package com.example.mytestapp
 
+import android.app.Activity
 import android.content.Context
 import android.os.Environment
 import androidx.activity.compose.BackHandler
@@ -22,7 +23,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.toArgb
+import android.graphics.BitmapFactory
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
@@ -38,30 +42,66 @@ import java.util.zip.ZipFile
 // 화면 정의
 sealed class Screen {
     object BookList : Screen()
-    data class FileList(val book: File) : Screen()
+    data class FileList(val book: File, val type: BookType) : Screen()
     data class Viewer(
         val book: File,
         val currentPath: String,
         val allPaths: List<String>,
         val initialScrollPosition: Int = 0
     ) : Screen()
+    data class WebtoonViewer(
+        val book: File,
+        val chapterPath: String,
+        val allChapters: List<String>,
+        val initialScrollPosition: Int = 0
+    ) : Screen()
 }
 
-fun getFilePaths(book: File): List<String> {
-    return if (book.extension.lowercase() == "zip") {
-        try {
-            ZipFile(book).use { zip ->
-                zip.entries().asSequence()
-                    .filter { !it.isDirectory && it.name.lowercase().endsWith(".txt") }
-                    .map { it.name }
-                    .sorted()
-                    .toList()
-            }
-        } catch (e: Exception) { emptyList() }
-    } else {
-        book.listFiles { file -> file.extension.lowercase() == "txt" }
-            ?.sortedBy { it.name }
-            ?.map { it.absolutePath } ?: emptyList()
+data class BookItem(
+    val file: File,
+    val type: BookType,
+    val displayName: String
+)
+
+enum class BookType {
+    NOVEL, WEBTOON
+}
+
+fun getFilePaths(book: File, type: BookType): List<String> {
+    return if (type == BookType.NOVEL) {
+        if (book.extension.lowercase() == "zip") {
+            try {
+                ZipFile(book).use { zip ->
+                    zip.entries().asSequence()
+                        .filter { !it.isDirectory && it.name.lowercase().endsWith(".txt") }
+                        .map { it.name }
+                        .sorted()
+                        .toList()
+                }
+            } catch (e: Exception) { emptyList() }
+        } else {
+            book.listFiles { file -> file.extension.lowercase() == "txt" }
+                ?.sortedBy { it.name }
+                ?.map { it.absolutePath } ?: emptyList()
+        }
+    } else { // WEBTOON
+        if (book.extension.lowercase() == "zip") {
+            try {
+                ZipFile(book).use { zip ->
+                    zip.entries().asSequence()
+                        .filter { it.isDirectory }
+                        .map { it.name.removeSuffix("/") }
+                        .filter { it.isNotEmpty() && !it.contains("/") } // 최상위 폴더만 화로 인식
+                        .distinct()
+                        .sorted()
+                        .toList()
+                }
+            } catch (e: Exception) { emptyList() }
+        } else {
+            book.listFiles { file -> file.isDirectory }
+                ?.sortedBy { it.name }
+                ?.map { it.absolutePath } ?: emptyList()
+        }
     }
 }
 
@@ -133,7 +173,8 @@ data class ViewerSettings(
     val lineSpacing: Float = 1.6f,
     val backgroundColor: Color = Color(0xFFF4ECD8),
     val textColor: Color = Color(0xFF3C2F2F),
-    val fontFamily: FontFamily = FontFamily.Default
+    val fontFamily: FontFamily = FontFamily.Default,
+    val brightness: Float = -1f // -1은 시스템 기본값
 )
 
 fun saveSettings(context: Context, settings: ViewerSettings) {
@@ -142,6 +183,7 @@ fun saveSettings(context: Context, settings: ViewerSettings) {
         putFloat("lineSpacing", settings.lineSpacing)
         putInt("bgColor", settings.backgroundColor.toArgb())
         putInt("textColor", settings.textColor.toArgb())
+        putFloat("brightness", settings.brightness)
     }
 }
 
@@ -151,7 +193,8 @@ fun loadSettings(context: Context): ViewerSettings {
         fontSize = prefs.getFloat("fontSize", 18f),
         lineSpacing = prefs.getFloat("lineSpacing", 1.6f),
         backgroundColor = Color(prefs.getInt("bgColor", Color(0xFFF4ECD8).toArgb())),
-        textColor = Color(prefs.getInt("textColor", Color(0xFF3C2F2F).toArgb()))
+        textColor = Color(prefs.getInt("textColor", Color(0xFF3C2F2F).toArgb())),
+        brightness = prefs.getFloat("brightness", -1f)
     )
 }
 
@@ -168,9 +211,15 @@ fun NovelViewerApp() {
         if (session.bookPath != null && session.filePath != null) {
             val book = File(session.bookPath)
             if (book.exists()) {
-                val allPaths = getFilePaths(book)
+                val isWebtoon = book.absolutePath.contains("Webtoon")
+                val type = if (isWebtoon) BookType.WEBTOON else BookType.NOVEL
+                val allPaths = getFilePaths(book, type)
                 if (allPaths.contains(session.filePath)) {
-                    currentScreen = Screen.Viewer(book, session.filePath, allPaths, session.scrollPosition)
+                    if (type == BookType.NOVEL) {
+                        currentScreen = Screen.Viewer(book, session.filePath, allPaths, session.scrollPosition)
+                    } else {
+                        currentScreen = Screen.WebtoonViewer(book, session.filePath, allPaths, session.scrollPosition)
+                    }
                 }
             }
         }
@@ -186,8 +235,9 @@ fun NovelViewerApp() {
     // 시스템 뒤로가기 핸들링
     BackHandler(enabled = currentScreen !is Screen.BookList) {
         when (val screen = currentScreen) {
-            is Screen.Viewer -> currentScreen = Screen.FileList(screen.book)
+            is Screen.Viewer -> currentScreen = Screen.FileList(screen.book, BookType.NOVEL)
             is Screen.FileList -> currentScreen = Screen.BookList
+            is Screen.WebtoonViewer -> currentScreen = Screen.FileList(screen.book, BookType.WEBTOON)
             else -> { /* BookList일 때는 작동하지 않음 (앱 종료) */ }
         }
     }
@@ -196,16 +246,33 @@ fun NovelViewerApp() {
         modifier = Modifier.fillMaxSize(),
         color = settings.backgroundColor
     ) {
+        // 밝기 적용
+        val activity = context as? Activity
+        SideEffect {
+            activity?.window?.let { window ->
+                val params = window.attributes
+                params.screenBrightness = if (settings.brightness < 0) -1f else settings.brightness.coerceIn(0.01f, 1.0f)
+                window.attributes = params
+            }
+        }
+        
         when (val screen = currentScreen) {
             is Screen.BookList -> BookListScreen(
                 settings = settings,
-                onBookClick = { currentScreen = Screen.FileList(it) }
+                onBookClick = { bookItem ->
+                    currentScreen = Screen.FileList(bookItem.file, bookItem.type)
+                }
             )
             is Screen.FileList -> FileListScreen(
                 book = screen.book,
+                type = screen.type,
                 settings = settings,
                 onFileClick = { path, allPaths, position -> 
-                    currentScreen = Screen.Viewer(screen.book, path, allPaths, position) 
+                    if (screen.type == BookType.NOVEL) {
+                        currentScreen = Screen.Viewer(screen.book, path, allPaths, position)
+                    } else {
+                        currentScreen = Screen.WebtoonViewer(screen.book, path, allPaths, position)
+                    }
                 },
                 onBack = { currentScreen = Screen.BookList }
             )
@@ -219,10 +286,22 @@ fun NovelViewerApp() {
                     settings = newSettings
                     saveSettings(context, newSettings)
                 },
-                onBack = { currentScreen = Screen.FileList(screen.book) },
+                onBack = { currentScreen = Screen.FileList(screen.book, BookType.NOVEL) },
                 onFileChange = { nextPath ->
                     currentScreen = Screen.Viewer(screen.book, nextPath, screen.allPaths, 0)
                 }
+            )
+            is Screen.WebtoonViewer -> WebtoonViewerScreen(
+                book = screen.book,
+                chapterPath = screen.chapterPath,
+                allChapters = screen.allChapters,
+                initialScrollPosition = screen.initialScrollPosition,
+                settings = settings,
+                onSettingsChange = { newSettings ->
+                    settings = newSettings
+                    saveSettings(context, newSettings)
+                },
+                onBack = { currentScreen = Screen.FileList(screen.book, BookType.WEBTOON) }
             )
         }
     }
@@ -230,20 +309,48 @@ fun NovelViewerApp() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun BookListScreen(settings: ViewerSettings, onBookClick: (File) -> Unit) {
+fun BookListScreen(settings: ViewerSettings, onBookClick: (BookItem) -> Unit) {
     val context = LocalContext.current
-    val rootPath = File(Environment.getExternalStorageDirectory(), "Books/소설")
+    val novelRoot = File(Environment.getExternalStorageDirectory(), "Books/소설")
+    val webtoonRoot = File(Environment.getExternalStorageDirectory(), "Books/Webtoon")
+    
     var sortOrder by remember { mutableStateOf(loadSortOrder(context)) }
     var isRefreshing by remember { mutableStateOf(false) }
     
-    val books = remember(sortOrder, isRefreshing) {
-        val list = rootPath.listFiles { file -> 
+    val allBooks = remember(sortOrder, isRefreshing) {
+        val novelList = novelRoot.listFiles { file -> 
             file.isDirectory || file.extension.lowercase() == "zip" 
-        }?.toList() ?: emptyList()
+        }?.map { 
+            BookItem(it, BookType.NOVEL, it.name)
+        } ?: emptyList()
+
+        val webtoonList = webtoonRoot.listFiles { file -> 
+            file.isDirectory || file.extension.lowercase() == "zip" 
+        }?.map { file ->
+            var displayName = file.nameWithoutExtension
+            if (file.isDirectory) {
+                val titleFile = File(file, "title.txt")
+                if (titleFile.exists()) {
+                    displayName = titleFile.readLines().firstOrNull() ?: displayName
+                }
+            } else if (file.extension.lowercase() == "zip") {
+                try {
+                    ZipFile(file).use { zip ->
+                        val entry = zip.getEntry("title.txt")
+                        if (entry != null) {
+                            displayName = zip.getInputStream(entry).bufferedReader().readLine() ?: displayName
+                        }
+                    }
+                } catch (e: Exception) {}
+            }
+            BookItem(file, BookType.WEBTOON, displayName)
+        } ?: emptyList()
+
+        val combined = novelList + webtoonList
         
         when (sortOrder) {
-            SortOrder.LATEST -> list.sortedByDescending { it.lastModified() }
-            SortOrder.NAME -> list.sortedBy { it.name }
+            SortOrder.LATEST -> combined.sortedByDescending { it.file.lastModified() }
+            SortOrder.NAME -> combined.sortedBy { it.displayName }
         }
     }
     
@@ -257,7 +364,7 @@ fun BookListScreen(settings: ViewerSettings, onBookClick: (File) -> Unit) {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("소설 도서관", color = settings.textColor) },
+                title = { Text("도서관", color = settings.textColor) },
                 actions = {
                     Box {
                         Text(
@@ -299,18 +406,21 @@ fun BookListScreen(settings: ViewerSettings, onBookClick: (File) -> Unit) {
             onRefresh = onRefresh,
             modifier = Modifier.padding(padding).fillMaxSize()
         ) {
-            if (books.isEmpty()) {
+            if (allBooks.isEmpty()) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text("소설이나 ZIP 파일이 없습니다.\n아래로 당겨서 새로고침", color = settings.textColor)
+                    Text("도서가 없습니다.\n아래로 당겨서 새로고침", color = settings.textColor)
                 }
             } else {
                 LazyColumn(modifier = Modifier.fillMaxSize()) {
-                    items(books) { book ->
-                        val displayName = if (book.extension.lowercase() == "zip") "[ZIP] ${book.nameWithoutExtension}" else book.name
+                    items(allBooks) { bookItem ->
+                        val typeSuffix = if (bookItem.type == BookType.NOVEL) " (소설)" else " (웹툰)"
+                        val zipPrefix = if (bookItem.file.extension.lowercase() == "zip") "[ZIP] " else ""
+                        val displayName = zipPrefix + bookItem.displayName + typeSuffix
+                        
                         ListItem(
                             headlineContent = { Text(displayName, color = settings.textColor) },
                             colors = ListItemDefaults.colors(containerColor = settings.backgroundColor),
-                            modifier = Modifier.clickable { onBookClick(book) }
+                            modifier = Modifier.clickable { onBookClick(bookItem) }
                         )
                     }
                 }
@@ -321,9 +431,9 @@ fun BookListScreen(settings: ViewerSettings, onBookClick: (File) -> Unit) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun FileListScreen(book: File, settings: ViewerSettings, onFileClick: (String, List<String>, Int) -> Unit, onBack: () -> Unit) {
+fun FileListScreen(book: File, type: BookType, settings: ViewerSettings, onFileClick: (String, List<String>, Int) -> Unit, onBack: () -> Unit) {
     val context = LocalContext.current
-    val filePaths = remember(book) { getFilePaths(book) }
+    val filePaths = remember(book) { getFilePaths(book, type) }
 
     Scaffold(
         topBar = {
@@ -336,7 +446,7 @@ fun FileListScreen(book: File, settings: ViewerSettings, onFileClick: (String, L
     ) { padding ->
         if (filePaths.isEmpty()) {
             Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
-                Text("텍스트 파일이 없습니다.", color = settings.textColor)
+                Text(if (type == BookType.NOVEL) "텍스트 파일이 없습니다." else "화별 폴더가 없습니다.", color = settings.textColor)
             }
         } else {
             LazyColumn(modifier = Modifier.padding(padding)) {
@@ -538,6 +648,13 @@ fun SettingsDialog(settings: ViewerSettings, onSettingsChange: (ViewerSettings) 
         title = { Text("뷰어 설정") },
         text = {
             Column {
+                Text("화면 밝기: ${if (settings.brightness < 0) "시스템 기본" else (settings.brightness * 100).toInt().toString() + "%"}")
+                Slider(
+                    value = if (settings.brightness < 0) 0.5f else settings.brightness,
+                    onValueChange = { onSettingsChange(settings.copy(brightness = it)) },
+                    valueRange = 0.01f..1.0f
+                )
+                Spacer(Modifier.height(8.dp))
                 Text("글자 크기: ${settings.fontSize.toInt()}")
                 Slider(value = settings.fontSize, onValueChange = { onSettingsChange(settings.copy(fontSize = it)) }, valueRange = 12f..40f)
                 Text("줄 간격: ${String.format(Locale.getDefault(), "%.1f", settings.lineSpacing)}")
@@ -576,5 +693,149 @@ fun ThemeOption(bg: Color, fg: Color, label: String, current: ViewerSettings, on
             if (current.backgroundColor == bg) Box(Modifier.fillMaxSize().background(Color.Gray.copy(alpha = 0.3f)))
         }
         Text(label, fontSize = 10.sp)
+    }
+}
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun WebtoonViewerScreen(
+    book: File,
+    chapterPath: String,
+    allChapters: List<String>,
+    initialScrollPosition: Int = 0,
+    settings: ViewerSettings,
+    onSettingsChange: (ViewerSettings) -> Unit,
+    onBack: () -> Unit
+) {
+    val context = LocalContext.current
+    var showSettings by remember { mutableStateOf(false) }
+    val isZip = book.extension.lowercase() == "zip"
+    
+    val images = remember(chapterPath) {
+        if (isZip) {
+            try {
+                ZipFile(book).use { zip ->
+                    zip.entries().asSequence()
+                        .filter { 
+                            !it.isDirectory && 
+                            it.name.startsWith(chapterPath + "/") &&
+                            it.name.lowercase().let { n -> n.endsWith(".jpg") || n.endsWith(".jpeg") || n.endsWith(".png") || n.endsWith(".webp") } 
+                        }
+                        .map { it.name }
+                        .sorted()
+                        .toList()
+                }
+            } catch (e: Exception) { emptyList() }
+        } else {
+            File(chapterPath).listFiles { file -> 
+                val ext = file.extension.lowercase()
+                ext == "jpg" || ext == "jpeg" || ext == "png" || ext == "webp"
+            }?.sortedBy { it.name }?.map { it.absolutePath } ?: emptyList()
+        }
+    }
+
+    val listState = key(chapterPath) {
+        androidx.compose.foundation.lazy.rememberLazyListState(initialFirstVisibleItemIndex = initialScrollPosition)
+    }
+    
+    val progress by remember {
+        derivedStateOf {
+            if (images.isNotEmpty()) {
+                (listState.firstVisibleItemIndex.toFloat() / images.size * 100).toInt()
+            } else 0
+        }
+    }
+
+    LaunchedEffect(listState.firstVisibleItemIndex) {
+        saveLastSession(context, LastSession(book.absolutePath, chapterPath, listState.firstVisibleItemIndex))
+        saveFilePosition(context, book.absolutePath, chapterPath, listState.firstVisibleItemIndex)
+        if (images.isNotEmpty()) {
+            val currentProgress = (listState.firstVisibleItemIndex.toFloat() / images.size * 100).toInt()
+            saveFileProgress(context, book.absolutePath, chapterPath, currentProgress)
+        }
+    }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { 
+                    Column {
+                        Text(chapterPath.substringAfterLast('/'), color = settings.textColor, fontSize = 16.sp)
+                        Text(
+                            text = "이미지: ${images.size}장 | 진행률: $progress%",
+                            color = settings.textColor.copy(alpha = 0.7f),
+                            fontSize = 11.sp
+                        )
+                    }
+                },
+                actions = {
+                    Text("설정", color = settings.textColor, modifier = Modifier.padding(end = 16.dp).clickable { showSettings = true })
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = settings.backgroundColor,
+                    titleContentColor = settings.textColor,
+                    navigationIconContentColor = settings.textColor,
+                    actionIconContentColor = settings.textColor
+                )
+            )
+        },
+        containerColor = Color.Black
+    ) { padding ->
+        if (images.isEmpty()) {
+            Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
+                Text("이미지 파일이 없습니다.", color = Color.White)
+            }
+        } else {
+            LazyColumn(
+                state = listState,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+            ) {
+                items(images) { imagePath ->
+                    var bitmap by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
+                    
+                    LaunchedEffect(imagePath) {
+                        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                            try {
+                                if (isZip) {
+                                    ZipFile(book).use { zip ->
+                                        val entry = zip.getEntry(imagePath)
+                                        zip.getInputStream(entry).use { BitmapFactory.decodeStream(it) }
+                                    }
+                                } else {
+                                    BitmapFactory.decodeFile(imagePath)
+                                }
+                            } catch (e: Exception) { null }
+                        }?.let { bitmap = it }
+                    }
+
+                    if (bitmap != null) {
+                        androidx.compose.foundation.Image(
+                            bitmap = bitmap!!.asImageBitmap(),
+                            contentDescription = null,
+                            modifier = Modifier.fillMaxWidth(),
+                            contentScale = androidx.compose.ui.layout.ContentScale.FillWidth
+                        )
+                    } else {
+                        Box(modifier = Modifier.fillMaxWidth().height(400.dp).background(Color.DarkGray))
+                    }
+                    
+                    DisposableEffect(imagePath) {
+                        onDispose {
+                            bitmap?.recycle()
+                            bitmap = null
+                        }
+                    }
+                }
+            }
+        }
+
+        if (showSettings) {
+            SettingsDialog(
+                settings = settings,
+                onSettingsChange = onSettingsChange,
+                onDismiss = { showSettings = false }
+            )
+        }
     }
 }
