@@ -22,6 +22,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.material3.*
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
@@ -217,7 +219,9 @@ data class ViewerSettings(
     val backgroundColor: Color = Color(0xFFF4ECD8),
     val textColor: Color = Color(0xFF3C2F2F),
     val fontFamily: FontFamily = FontFamily.Default,
-    val brightness: Float = -1f // -1은 시스템 기본값
+    val brightness: Float = -1f, // -1은 시스템 기본값
+    val lastManualBrightness: Float = 0.5f, // 마지막으로 설정했던 수동 밝기 값 저장
+    val customTextColor: Color = Color(0xFF3C2F2F) // 커스텀 글자 색상 저장
 )
 
 fun saveSettings(context: Context, settings: ViewerSettings) {
@@ -227,6 +231,8 @@ fun saveSettings(context: Context, settings: ViewerSettings) {
         putInt("bgColor", settings.backgroundColor.toArgb())
         putInt("textColor", settings.textColor.toArgb())
         putFloat("brightness", settings.brightness)
+        putFloat("lastManualBrightness", settings.lastManualBrightness)
+        putInt("customTextColor", settings.customTextColor.toArgb())
     }
 }
 
@@ -237,7 +243,9 @@ fun loadSettings(context: Context): ViewerSettings {
         lineSpacing = prefs.getFloat("lineSpacing", 1.6f),
         backgroundColor = Color(prefs.getInt("bgColor", Color(0xFFF4ECD8).toArgb())),
         textColor = Color(prefs.getInt("textColor", Color(0xFF3C2F2F).toArgb())),
-        brightness = prefs.getFloat("brightness", -1f)
+        brightness = prefs.getFloat("brightness", -1f),
+        lastManualBrightness = prefs.getFloat("lastManualBrightness", 0.5f),
+        customTextColor = Color(prefs.getInt("customTextColor", Color(0xFF3C2F2F).toArgb()))
     )
 }
 
@@ -862,18 +870,108 @@ fun ViewerScreen(
 }
 
 @Composable
+fun CustomColorPickerDialog(
+    initialColor: Color,
+    onColorSelected: (Color) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var red by remember { mutableIntStateOf((initialColor.red * 255).toInt()) }
+    var green by remember { mutableIntStateOf((initialColor.green * 255).toInt()) }
+    var blue by remember { mutableIntStateOf((initialColor.blue * 255).toInt()) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("커스텀 색상 설정") },
+        text = {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                // 미리보기 박스
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(80.dp)
+                        .background(Color(red, green, blue), RoundedCornerShape(8.dp))
+                        .border(1.dp, Color.Gray, RoundedCornerShape(8.dp))
+                )
+                
+                Spacer(modifier = Modifier.height(16.dp))
+
+                ColorChannelInput("Red", red) { red = it }
+                ColorChannelInput("Green", green) { green = it }
+                ColorChannelInput("Blue", blue) { blue = it }
+            }
+        },
+        confirmButton = {
+            Button(onClick = { onColorSelected(Color(red, green, blue)) }) {
+                Text("확인")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("취소")
+            }
+        }
+    )
+}
+
+@Composable
+fun ColorChannelInput(label: String, value: Int, onValueChange: (Int) -> Unit) {
+    Column {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(label, modifier = Modifier.width(50.dp))
+            Slider(
+                value = value.toFloat(),
+                onValueChange = { onValueChange(it.toInt()) },
+                valueRange = 0f..255f,
+                modifier = Modifier.weight(1f)
+            )
+            OutlinedTextField(
+                value = value.toString(),
+                onValueChange = {
+                    val newValue = it.toIntOrNull()?.coerceIn(0, 255) ?: value
+                    onValueChange(newValue)
+                },
+                modifier = Modifier.width(70.dp),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                singleLine = true
+            )
+        }
+    }
+}
+
+@Composable
 fun SettingsDialog(settings: ViewerSettings, onSettingsChange: (ViewerSettings) -> Unit, onDismiss: () -> Unit) {
+    var showColorPicker by remember { mutableStateOf(false) }
+
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("뷰어 설정") },
         text = {
             Column {
-                Text("화면 밝기: ${if (settings.brightness < 0) "시스템 기본" else (settings.brightness * 100).toInt().toString() + "%"}")
-                Slider(
-                    value = if (settings.brightness < 0) 0.5f else settings.brightness,
-                    onValueChange = { onSettingsChange(settings.copy(brightness = it)) },
-                    valueRange = 0.01f..1.0f
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("화면 밝기: ${if (settings.brightness < 0) "자동" else (settings.brightness * 100).toInt().toString() + "%"}", modifier = Modifier.weight(1f))
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Slider(
+                        value = if (settings.brightness < 0) settings.lastManualBrightness else settings.brightness,
+                        onValueChange = { 
+                            onSettingsChange(settings.copy(brightness = it, lastManualBrightness = it)) 
+                        },
+                        modifier = Modifier.weight(1f),
+                        valueRange = 0.01f..1.0f
+                    )
+                    TextButton(
+                        onClick = { 
+                            val newBrightness = if (settings.brightness < 0) settings.lastManualBrightness else -1f
+                            onSettingsChange(settings.copy(brightness = newBrightness)) 
+                        },
+                        contentPadding = PaddingValues(horizontal = 8.dp)
+                    ) {
+                        Text(
+                            "Auto",
+                            color = if (settings.brightness < 0) MaterialTheme.colorScheme.primary else settings.textColor.copy(alpha = 0.5f)
+                        )
+                    }
+                }
                 Spacer(Modifier.height(8.dp))
                 Text("글자 크기: ${settings.fontSize.toInt()}")
                 Slider(value = settings.fontSize, onValueChange = { onSettingsChange(settings.copy(fontSize = it)) }, valueRange = 12f..40f)
@@ -888,22 +986,59 @@ fun SettingsDialog(settings: ViewerSettings, onSettingsChange: (ViewerSettings) 
                 }
                 Spacer(Modifier.height(16.dp))
                 Text("글자 색상만 변경")
-                Row(modifier = Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    val colors = listOf(Color.Black, Color.White, Color.Gray, Color(0xFF001F3F), Color(0xFF3D2B1F))
-                    colors.forEach { color ->
-                        Box(
-                            modifier = Modifier.size(32.dp).clip(CircleShape).background(color).border(
-                                width = if (settings.textColor == color) 2.dp else 1.dp,
-                                color = if (settings.textColor == color) MaterialTheme.colorScheme.primary else Color.LightGray,
-                                shape = CircleShape
-                            ).clickable { onSettingsChange(settings.copy(textColor = color)) }
-                        )
+                Row(modifier = Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    // 프리셋 (검정, 흰색, 회색)
+                    val presets = listOf(Color.Black, Color.White, Color.Gray)
+                    presets.forEach { color ->
+                        ColorOption(color, settings, onSettingsChange)
+                    }
+
+                    // 커스텀 색상 버튼 (오른쪽 끝 부근)
+                    Box(
+                        modifier = Modifier.size(32.dp).clip(CircleShape).background(settings.customTextColor).border(
+                            width = if (settings.textColor == settings.customTextColor) 2.dp else 1.dp,
+                            color = if (settings.textColor == settings.customTextColor) MaterialTheme.colorScheme.primary else Color.LightGray,
+                            shape = CircleShape
+                        ).clickable { onSettingsChange(settings.copy(textColor = settings.customTextColor)) },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text("C", color = if (settings.customTextColor.luminance() > 0.5f) Color.Black else Color.White, fontSize = 12.sp)
+                    }
+                    
+                    TextButton(onClick = { showColorPicker = true }) {
+                        Text("설정", fontSize = 12.sp)
                     }
                 }
             }
         },
         confirmButton = { Button(onClick = onDismiss) { Text("확인") } }
     )
+
+    if (showColorPicker) {
+        CustomColorPickerDialog(
+            initialColor = settings.customTextColor,
+            onColorSelected = { newColor ->
+                onSettingsChange(settings.copy(customTextColor = newColor, textColor = newColor))
+                showColorPicker = false
+            },
+            onDismiss = { showColorPicker = false }
+        )
+    }
+}
+
+@Composable
+fun ColorOption(color: Color, settings: ViewerSettings, onSettingsChange: (ViewerSettings) -> Unit) {
+    Box(
+        modifier = Modifier.size(32.dp).clip(CircleShape).background(color).border(
+            width = if (settings.textColor == color) 2.dp else 1.dp,
+            color = if (settings.textColor == color) MaterialTheme.colorScheme.primary else Color.LightGray,
+            shape = CircleShape
+        ).clickable { onSettingsChange(settings.copy(textColor = color)) }
+    )
+}
+
+fun Color.luminance(): Float {
+    return 0.2126f * red + 0.7152f * green + 0.0722f * blue
 }
 
 @Composable

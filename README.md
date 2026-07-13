@@ -23,6 +23,16 @@ Jetpack Compose로 구축된 소설(TXT, ZIP) 및 웹툰(이미지, ZIP) 읽기 
 *   **Interactive Scrollbar**: A high-performance, draggable vertical scrollbar in chapter lists for quick navigation through thousands of items.
     *   **인터랙티브 스크롤바**: 수천 개의 챕터 목록을 빠르게 탐색할 수 있는 드래그 가능한 시각적 스크롤바를 지원합니다. 조작 시 두께가 확장되는 시각 피드백을 제공합니다.
 
+### 🎨 Customizable Experience (개인 맞춤형 설정)
+*   **Themes**: Multiple background and text color presets (Light, Dark, Hanji).
+    *   **테마**: 다양한 배경 및 글자 색상 프리셋(밝게, 어둡게, 한지)을 제공합니다.
+*   **Custom Text Color**: Fine-tune your reading experience by creating a custom text color using RGB sliders or direct numeric input.
+    *   **글자 커스텀 색상**: RGB 슬라이더나 숫자 입력을 통해 나만의 글자 색상을 정밀하게 설정하고 저장할 수 있습니다.
+*   **Adaptive Brightness**: Easily toggle between system-wide adaptive brightness and manual override with a dedicated [Auto] button.
+    *   **화면 밝기 최적화**: [Auto] 버튼을 통해 시스템 자동 밝기와 수동 조절 모드를 간편하게 전환할 수 있습니다. 수동 설정값은 모드 전환 후에도 유지됩니다.
+*   **Typography**: Adjustable font size and line spacing for novels.
+    *   **타이포그래피**: 소설 읽기 시 글자 크기와 줄 간격을 자유롭게 조절할 수 있습니다.
+
 ### 🎮 Intuitive Gestures (직관적인 제스처)
 *   **Swipe Gestures**: Swipe left or right to move between previous and next files/chapters in both novel and webtoon viewers.
     *   **스와이프 제스처**: 소설과 웹툰 뷰어 모두에서 좌우 스와이프를 통해 이전/다음 파일로 간편하게 이동합니다.
@@ -42,12 +52,6 @@ Jetpack Compose로 구축된 소설(TXT, ZIP) 및 웹툰(이미지, ZIP) 읽기 
     *   **통합 정렬**: 모든 도서를 '최신순' 또는 '가나다순'으로 한꺼번에 정렬할 수 있습니다.
 *   **Per-Chapter Progress**: Shows the reading progress (%) for each chapter in the file list.
     *   **챕터별 진행률**: 파일 목록에서 각 챕터별 읽기 진행률(%)을 확인할 수 있습니다.
-
-### 🎨 Customizable Experience (개인 맞춤형 설정)
-*   **Themes**: Multiple background and text color presets (Light, Dark, Hanji).
-    *   **테마**: 다양한 배경 및 글자 색상 프리셋(밝게, 어둡게, 한지)을 제공합니다.
-*   **Typography**: Adjustable font size and line spacing for novels.
-    *   **타이포그래피**: 소설 읽기 시 글자 크기와 줄 간격을 자유롭게 조절할 수 있습니다.
 
 ## Tech Stack (기술 스택)
 *   Language: Kotlin
