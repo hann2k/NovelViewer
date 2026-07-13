@@ -7,13 +7,20 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.*
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
@@ -24,6 +31,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
 import android.graphics.BitmapFactory
 import androidx.compose.ui.input.pointer.pointerInput
@@ -34,6 +42,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.edit
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.launch
 import java.io.File
 import java.util.Locale
 import java.util.zip.ZipFile
@@ -136,6 +145,21 @@ fun saveLastSession(context: Context, session: LastSession) {
         putString("lastFilePath", session.filePath)
         putInt("lastScrollPosition", session.scrollPosition)
     }
+    // 책별 마지막 세션 저장
+    if (session.bookPath != null && session.filePath != null) {
+        context.getSharedPreferences("book_last_session_prefs", Context.MODE_PRIVATE).edit {
+            putString("${session.bookPath}:filePath", session.filePath)
+            putInt("${session.bookPath}:scrollPosition", session.scrollPosition)
+        }
+    }
+}
+
+fun getBookLastSession(context: Context, bookPath: String): Pair<String?, Int> {
+    val prefs = context.getSharedPreferences("book_last_session_prefs", Context.MODE_PRIVATE)
+    return Pair(
+        prefs.getString("$bookPath:filePath", null),
+        prefs.getInt("$bookPath:scrollPosition", 0)
+    )
 }
 
 fun loadLastSession(context: Context): LastSession {
@@ -281,6 +305,13 @@ fun NovelViewerApp() {
                 settings = settings,
                 onBookClick = { bookItem ->
                     currentScreen = Screen.FileList(bookItem.file, bookItem.type)
+                },
+                onRecentClick = { book, path, allPaths, position, type ->
+                    if (type == BookType.NOVEL) {
+                        currentScreen = Screen.Viewer(book, path, allPaths, position)
+                    } else {
+                        currentScreen = Screen.WebtoonViewer(book, path, allPaths, position)
+                    }
                 }
             )
             is Screen.FileList -> {
@@ -337,7 +368,11 @@ fun NovelViewerApp() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun BookListScreen(settings: ViewerSettings, onBookClick: (BookItem) -> Unit) {
+fun BookListScreen(
+    settings: ViewerSettings,
+    onBookClick: (BookItem) -> Unit,
+    onRecentClick: (File, String, List<String>, Int, BookType) -> Unit
+) {
     val context = LocalContext.current
     val novelRoot = File(Environment.getExternalStorageDirectory(), "Books/소설")
     val webtoonRoot = File(Environment.getExternalStorageDirectory(), "Books/Webtoon")
@@ -365,6 +400,22 @@ fun BookListScreen(settings: ViewerSettings, onBookClick: (BookItem) -> Unit) {
             SortOrder.NAME -> combined.sortedBy { it.displayName }
         }
     }
+
+    val lastSession = remember(isRefreshing) {
+        val session = loadLastSession(context)
+        if (session.bookPath != null && session.filePath != null) {
+            val book = File(session.bookPath)
+            if (book.exists()) {
+                val isWebtoon = book.absolutePath.contains("Webtoon")
+                val type = if (isWebtoon) BookType.WEBTOON else BookType.NOVEL
+                val allPaths = getFilePaths(book, type)
+                if (allPaths.contains(session.filePath)) {
+                    android.util.Log.d("BookListScreen", "Found last session: ${session.filePath}")
+                    Triple(book, session, type)
+                } else null
+            } else null
+        } else null
+    }
     
     var showSortMenu by remember { mutableStateOf(false) }
 
@@ -378,6 +429,14 @@ fun BookListScreen(settings: ViewerSettings, onBookClick: (BookItem) -> Unit) {
             TopAppBar(
                 title = { Text("도서관", color = settings.textColor) },
                 actions = {
+                    if (lastSession != null) {
+                        TextButton(onClick = {
+                            val (book, session, type) = lastSession
+                            onRecentClick(book, session.filePath!!, getFilePaths(book, type), session.scrollPosition, type)
+                        }) {
+                            Text("최근 도서", color = settings.textColor)
+                        }
+                    }
                     Box {
                         Text(
                             text = if (sortOrder == SortOrder.LATEST) "최신순" else "가나다순",
@@ -440,17 +499,135 @@ fun BookListScreen(settings: ViewerSettings, onBookClick: (BookItem) -> Unit) {
     }
 }
 
+@Composable
+fun CustomScrollbar(
+    state: LazyListState,
+    modifier: Modifier = Modifier,
+    color: Color = Color.Gray
+) {
+    val coroutineScope = rememberCoroutineScope()
+    
+    // 드래그 중인지 여부 확인
+    var isDragging by remember { mutableStateOf(false) }
+
+    val scrollbarAlpha by animateFloatAsState(
+        targetValue = if (state.isScrollInProgress || isDragging) 0.8f else 0f,
+        animationSpec = tween(durationMillis = 300),
+        label = "scrollbarAlpha"
+    )
+
+    val thumbWidth by animateFloatAsState(
+        targetValue = if (isDragging) 8f else 4f,
+        animationSpec = tween(durationMillis = 200),
+        label = "thumbWidth"
+    )
+
+    if (scrollbarAlpha > 0f || isDragging) {
+        val layoutInfo = state.layoutInfo
+        val visibleItems = layoutInfo.visibleItemsInfo
+        if (visibleItems.isNotEmpty()) {
+            val totalItemsCount = layoutInfo.totalItemsCount
+            val viewportHeight = layoutInfo.viewportEndOffset - layoutInfo.viewportStartOffset
+            
+            // 대략적인 전체 높이 계산 (평균 아이템 높이 * 총 개수)
+            val avgItemSize = visibleItems.map { it.size }.average().toFloat()
+            val estimatedTotalHeight = avgItemSize * totalItemsCount
+            
+            // 스크롤바 크기 비율 (최소 5% 확보)
+            val thumbHeightPercent = (viewportHeight / estimatedTotalHeight).coerceIn(0.05f, 1.0f)
+            
+            // 현재 스크롤 위치 비율
+            val firstItemIndex = state.firstVisibleItemIndex
+            val firstItemOffset = state.firstVisibleItemScrollOffset
+            val scrollPercent = ((firstItemIndex * avgItemSize + firstItemOffset) / estimatedTotalHeight).coerceIn(0f, 1f)
+
+            BoxWithConstraints(
+                modifier = modifier
+                    .fillMaxHeight()
+                    .width(40.dp) // 넓은 터치 영역 확보
+                    .graphicsLayer(alpha = scrollbarAlpha)
+                    .pointerInput(estimatedTotalHeight, viewportHeight) {
+                        detectDragGestures(
+                            onDragStart = { isDragging = true },
+                            onDragEnd = { isDragging = false },
+                            onDragCancel = { isDragging = false },
+                            onDrag = { change, dragAmount ->
+                                change.consume()
+                                // 드래그 양(픽셀)을 전체 리스트의 스크롤 양으로 변환
+                                // 드래그한 픽셀 / 트랙 전체 높이 * 리스트 전체 높이
+                                val scrollDelta = (dragAmount.y / (size.height * (1f - thumbHeightPercent))) * (estimatedTotalHeight - viewportHeight)
+                                coroutineScope.launch {
+                                    state.scrollBy(scrollDelta)
+                                }
+                            }
+                        )
+                    }
+            ) {
+                val trackHeight = maxHeight
+                val thumbHeight = trackHeight * thumbHeightPercent
+                val thumbOffset = (trackHeight - thumbHeight) * scrollPercent
+
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.CenterEnd)
+                        .width(thumbWidth.dp)
+                        .fillMaxHeight()
+                        .background(color.copy(alpha = 0.1f), shape = RoundedCornerShape(thumbWidth.dp / 2))
+                )
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .offset(y = thumbOffset)
+                        .height(thumbHeight)
+                        .width(thumbWidth.dp)
+                        .background(color, shape = RoundedCornerShape(thumbWidth.dp / 2))
+                )
+            }
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun FileListScreen(book: File, type: BookType, settings: ViewerSettings, onFileClick: (String, List<String>, Int) -> Unit) {
     val context = LocalContext.current
     val filePaths = remember(book) { getFilePaths(book, type) }
     val bookDisplayName = remember(book) { getDisplayName(book) }
+    val listState = rememberLazyListState()
+
+    // SharedPreferences에서 직접 읽기 (책별 기록)
+    val lastSession = remember(book, filePaths) {
+        val prefs = context.getSharedPreferences("book_last_session_prefs", Context.MODE_PRIVATE)
+        val lastFilePath = prefs.getString("${book.absolutePath}:filePath", null)
+        val lastPos = prefs.getInt("${book.absolutePath}:scrollPosition", 0)
+        
+        if (lastFilePath != null && filePaths.contains(lastFilePath)) {
+            Triple(lastFilePath, filePaths, lastPos)
+        } else {
+            // 구버전 호환용 (기존 전역 세션에서 현재 책의 기록인지 확인)
+            val globalPrefs = context.getSharedPreferences("novel_prefs", Context.MODE_PRIVATE)
+            val globalBookPath = globalPrefs.getString("lastBookPath", null)
+            if (globalBookPath == book.absolutePath) {
+                val globalFilePath = globalPrefs.getString("lastFilePath", null)
+                val globalPos = globalPrefs.getInt("lastScrollPosition", 0)
+                if (globalFilePath != null && filePaths.contains(globalFilePath)) {
+                    Triple(globalFilePath, filePaths, globalPos)
+                } else null
+            } else null
+        }
+    }
 
     Scaffold(
         topBar = {
             TopAppBar(
                 title = { Text(bookDisplayName, color = settings.textColor) },
+                actions = {
+                    if (lastSession != null) {
+                        TextButton(onClick = { onFileClick(lastSession.first, lastSession.second, lastSession.third) }) {
+                            Text("이어서 보기", color = settings.textColor)
+                        }
+                    }
+                },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = settings.backgroundColor)
             )
         },
@@ -461,36 +638,49 @@ fun FileListScreen(book: File, type: BookType, settings: ViewerSettings, onFileC
                 Text(if (type == BookType.NOVEL) "텍스트 파일이 없습니다." else "화별 폴더가 없습니다.", color = settings.textColor)
             }
         } else {
-            LazyColumn(modifier = Modifier.padding(padding)) {
-                items(filePaths) { path ->
-                    val displayName = path.substringAfterLast('/').removeSuffix(".txt")
-                    val progress = getFileProgress(context, book.absolutePath, path)
-                    val position = getFilePosition(context, book.absolutePath, path)
-                    ListItem(
-                        headlineContent = { 
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text(
-                                    text = displayName,
-                                    color = settings.textColor,
-                                    modifier = Modifier.fillMaxWidth(0.7f),
-                                    maxLines = 1,
-                                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
-                                )
-                                Spacer(modifier = Modifier.weight(1f))
-                                if (progress > 0) {
+            Box(modifier = Modifier.padding(padding).fillMaxSize()) {
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier.fillMaxSize()
+                ) {
+                    items(filePaths) { path ->
+                        val displayName = path.substringAfterLast('/').removeSuffix(".txt")
+                        val progress = getFileProgress(context, book.absolutePath, path)
+                        val position = getFilePosition(context, book.absolutePath, path)
+                        ListItem(
+                            headlineContent = { 
+                                Row(verticalAlignment = Alignment.CenterVertically) {
                                     Text(
-                                        text = String.format(Locale.getDefault(), "%.2f%%", progress),
-                                        color = settings.textColor.copy(alpha = 0.5f),
-                                        fontSize = 12.sp,
-                                        modifier = Modifier.padding(start = 8.dp)
+                                        text = displayName,
+                                        color = settings.textColor,
+                                        modifier = Modifier.fillMaxWidth(0.7f),
+                                        maxLines = 1,
+                                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
                                     )
+                                    Spacer(modifier = Modifier.weight(1f))
+                                    if (progress > 0) {
+                                        Text(
+                                            text = String.format(Locale.getDefault(), "%.2f%%", progress),
+                                            color = settings.textColor.copy(alpha = 0.5f),
+                                            fontSize = 12.sp,
+                                            modifier = Modifier.padding(start = 8.dp)
+                                        )
+                                    }
                                 }
-                            }
-                        },
-                        colors = ListItemDefaults.colors(containerColor = settings.backgroundColor),
-                        modifier = Modifier.clickable { onFileClick(path, filePaths, position) }
-                    )
+                            },
+                            colors = ListItemDefaults.colors(containerColor = settings.backgroundColor),
+                            modifier = Modifier.clickable { onFileClick(path, filePaths, position) }
+                        )
+                    }
                 }
+                
+                CustomScrollbar(
+                    state = listState,
+                    modifier = Modifier
+                        .align(Alignment.CenterEnd)
+                        .padding(vertical = 4.dp, horizontal = 2.dp),
+                    color = settings.textColor
+                )
             }
         }
     }
