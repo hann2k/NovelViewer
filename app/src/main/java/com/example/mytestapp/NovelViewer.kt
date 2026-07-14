@@ -158,10 +158,24 @@ fun saveLastSession(context: Context, session: LastSession) {
 
 fun getBookLastSession(context: Context, bookPath: String): Pair<String?, Int> {
     val prefs = context.getSharedPreferences("book_last_session_prefs", Context.MODE_PRIVATE)
-    return Pair(
-        prefs.getString("$bookPath:filePath", null),
-        prefs.getInt("$bookPath:scrollPosition", 0)
-    )
+    val lastFilePath = prefs.getString("$bookPath:filePath", null)
+    val lastPos = prefs.getInt("$bookPath:scrollPosition", 0)
+    
+    if (lastFilePath != null) {
+        return Pair(lastFilePath, lastPos)
+    }
+
+    // 구버전 호환용 (기존 전역 세션에서 현재 책의 기록인지 확인)
+    val globalPrefs = context.getSharedPreferences("novel_prefs", Context.MODE_PRIVATE)
+    val globalBookPath = globalPrefs.getString("lastBookPath", null)
+    if (globalBookPath == bookPath) {
+        return Pair(
+            globalPrefs.getString("lastFilePath", null),
+            globalPrefs.getInt("lastScrollPosition", 0)
+        )
+    }
+    
+    return Pair(null, 0)
 }
 
 fun loadLastSession(context: Context): LastSession {
@@ -603,26 +617,12 @@ fun FileListScreen(book: File, type: BookType, settings: ViewerSettings, onFileC
     val bookDisplayName = remember(book) { getDisplayName(book) }
     val listState = rememberLazyListState()
 
-    // SharedPreferences에서 직접 읽기 (책별 기록)
+    // 책별 기록 불러오기
     val lastSession = remember(book, filePaths) {
-        val prefs = context.getSharedPreferences("book_last_session_prefs", Context.MODE_PRIVATE)
-        val lastFilePath = prefs.getString("${book.absolutePath}:filePath", null)
-        val lastPos = prefs.getInt("${book.absolutePath}:scrollPosition", 0)
-        
+        val (lastFilePath, lastPos) = getBookLastSession(context, book.absolutePath)
         if (lastFilePath != null && filePaths.contains(lastFilePath)) {
             Triple(lastFilePath, filePaths, lastPos)
-        } else {
-            // 구버전 호환용 (기존 전역 세션에서 현재 책의 기록인지 확인)
-            val globalPrefs = context.getSharedPreferences("novel_prefs", Context.MODE_PRIVATE)
-            val globalBookPath = globalPrefs.getString("lastBookPath", null)
-            if (globalBookPath == book.absolutePath) {
-                val globalFilePath = globalPrefs.getString("lastFilePath", null)
-                val globalPos = globalPrefs.getInt("lastScrollPosition", 0)
-                if (globalFilePath != null && filePaths.contains(globalFilePath)) {
-                    Triple(globalFilePath, filePaths, globalPos)
-                } else null
-            } else null
-        }
+        } else null
     }
 
     Scaffold(
@@ -707,58 +707,47 @@ fun ViewerScreen(
 ) {
     val context = LocalContext.current
     var showSettings by remember { mutableStateOf(false) }
-    val content = remember(currentPath) {
+    
+    // 문단 단위로 로드 (대용량 대응)
+    val paragraphs = remember(currentPath) {
         try {
             if (book.extension.lowercase() == "zip") {
                 ZipFile(book).use { zip ->
                     val entry = zip.getEntry(currentPath)
-                    zip.getInputStream(entry).bufferedReader(Charsets.UTF_8).readText()
+                    zip.getInputStream(entry).bufferedReader(Charsets.UTF_8).readLines()
                 }
             } else {
-                File(currentPath).readText(Charsets.UTF_8)
+                File(currentPath).readLines(Charsets.UTF_8)
             }
-        } catch (e: Exception) { "파일을 읽을 수 없습니다.\n${e.message}" }
+        } catch (e: Exception) { listOf("파일을 읽을 수 없습니다.\n${e.message}") }
     }
+
     val scrollState = key(currentPath) {
-        rememberScrollState(initialScrollPosition)
-    }
-
-    // 설정 변경 시 진행률 유지를 위한 로직
-    var scrollRatio by remember(currentPath) { mutableFloatStateOf(0f) }
-
-    // 스크롤 위치나 최대 스크롤 값이 변경될 때 비율 업데이트
-    LaunchedEffect(scrollState.value, scrollState.maxValue) {
-        if (scrollState.maxValue > 0) {
-            scrollRatio = scrollState.value.toFloat() / scrollState.maxValue
-        }
-    }
-
-    // 설정(글자 크기 등) 변경 즉시 기억해둔 비율로 위치 보정
-    LaunchedEffect(settings.fontSize, settings.lineSpacing) {
-        if (scrollState.maxValue > 0) {
-            val targetScroll = (scrollRatio * scrollState.maxValue).toInt()
-            scrollState.scrollTo(targetScroll)
-        }
+        rememberLazyListState(initialFirstVisibleItemIndex = initialScrollPosition)
     }
 
     val displayName = currentPath.substringAfterLast('/').removeSuffix(".txt")
-    val progress = if (scrollState.maxValue > 0) {
-        (scrollState.value.toFloat() / scrollState.maxValue * 100)
-    } else 0f
+    
+    // 전체 글자 수 (진행률 표시 보조용)
+    val totalChars = remember(paragraphs) { paragraphs.sumOf { it.length } }
+    
+    val progress by remember {
+        derivedStateOf {
+            if (paragraphs.isNotEmpty()) {
+                (scrollState.firstVisibleItemIndex.toFloat() / paragraphs.size * 100)
+            } else 0f
+        }
+    }
 
-    LaunchedEffect(currentPath) {
-        snapshotFlow { Pair(scrollState.value, scrollState.maxValue) }
-            .collectLatest { (value, maxValue) ->
-                // 즉시 세션 저장 (앱 종료 대비)
-                saveLastSession(context, LastSession(book.absolutePath, currentPath, value))
-                saveFilePosition(context, book.absolutePath, currentPath, value)
-                
-                if (maxValue > 0) {
-                    val currentProgress = (value.toFloat() / maxValue * 100)
-                    saveFileProgress(context, book.absolutePath, currentPath, currentProgress)
-                }
-                delay(500) // 빈번한 저장을 방지하기 위한 딜레이는 뒤로 이동
-            }
+    LaunchedEffect(scrollState.firstVisibleItemIndex) {
+        // 즉시 세션 저장
+        saveLastSession(context, LastSession(book.absolutePath, currentPath, scrollState.firstVisibleItemIndex))
+        saveFilePosition(context, book.absolutePath, currentPath, scrollState.firstVisibleItemIndex)
+        
+        if (paragraphs.isNotEmpty()) {
+            saveFileProgress(context, book.absolutePath, currentPath, progress)
+        }
+        delay(500)
     }
 
     Scaffold(
@@ -768,7 +757,7 @@ fun ViewerScreen(
                     Column {
                         Text(displayName, color = settings.textColor, fontSize = 16.sp)
                         Text(
-                            text = String.format(Locale.getDefault(), "전체: %d자 | 진행률: %.2f%%", content.length, progress),
+                            text = String.format(Locale.getDefault(), "전체: %d자 | 진행률: %.2f%%", totalChars, progress),
                             color = settings.textColor.copy(alpha = 0.7f),
                             fontSize = 11.sp
                         )
@@ -802,19 +791,11 @@ fun ViewerScreen(
                             val isRight = offset.x >= width / 2
 
                             if (isBottom && isLeft) {
-                                // 좌측 하단 더블 탭 -> 이전 파일
                                 val index = allPaths.indexOf(currentPath)
-                                if (index > 0) {
-                                    saveFilePosition(context, book.absolutePath, currentPath, scrollState.value)
-                                    onFileChange(allPaths[index - 1])
-                                }
+                                if (index > 0) onFileChange(allPaths[index - 1])
                             } else if (isBottom && isRight) {
-                                // 우측 하단 더블 탭 -> 다음 파일
                                 val index = allPaths.indexOf(currentPath)
-                                if (index < allPaths.size - 1) {
-                                    saveFilePosition(context, book.absolutePath, currentPath, scrollState.value)
-                                    onFileChange(allPaths[index + 1])
-                                }
+                                if (index < allPaths.size - 1) onFileChange(allPaths[index + 1])
                             }
                         }
                     )
@@ -830,33 +811,42 @@ fun ViewerScreen(
                         onDragEnd = {
                             val threshold = 150f
                             if (totalDragX > threshold) {
-                                // 오른쪽으로 스와이프 -> 이전 파일
                                 val index = allPaths.indexOf(currentPath)
-                                if (index > 0) {
-                                    saveFilePosition(context, book.absolutePath, currentPath, scrollState.value)
-                                    onFileChange(allPaths[index - 1])
-                                }
+                                if (index > 0) onFileChange(allPaths[index - 1])
                             } else if (totalDragX < -threshold) {
-                                // 왼쪽으로 스와이프 -> 다음 파일
                                 val index = allPaths.indexOf(currentPath)
-                                if (index < allPaths.size - 1) {
-                                    saveFilePosition(context, book.absolutePath, currentPath, scrollState.value)
-                                    onFileChange(allPaths[index + 1])
-                                }
+                                if (index < allPaths.size - 1) onFileChange(allPaths[index + 1])
                             }
                         }
                     )
                 }
         ) {
-            Column(modifier = Modifier.fillMaxSize().verticalScroll(scrollState).padding(16.dp)) {
-                Text(
-                    text = content,
-                    fontSize = settings.fontSize.sp,
-                    lineHeight = (settings.fontSize * settings.lineSpacing).sp,
-                    color = settings.textColor,
-                    fontFamily = settings.fontFamily
-                )
+            LazyColumn(
+                state = scrollState,
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(16.dp)
+            ) {
+                items(paragraphs) { paragraph ->
+                    Text(
+                        text = if (paragraph.isEmpty()) "\n" else paragraph,
+                        fontSize = settings.fontSize.sp,
+                        lineHeight = (settings.fontSize * settings.lineSpacing).sp,
+                        color = settings.textColor,
+                        fontFamily = settings.fontFamily,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp)
+                    )
+                }
             }
+
+            CustomScrollbar(
+                state = scrollState,
+                modifier = Modifier
+                    .align(Alignment.CenterEnd)
+                    .padding(vertical = 4.dp, horizontal = 2.dp),
+                color = settings.textColor
+            )
         }
 
         if (showSettings) {
